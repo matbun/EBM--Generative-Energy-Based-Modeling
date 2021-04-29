@@ -151,7 +151,7 @@ class DeepEnergyModel:
         elif os.path.exists(self.ckpt_path) and self.overwrite:
             # Remove existsing folder
             shutil.rmtree(self.ckpt_path)
-            print("Overwritten existsing logs")
+            print("Overwritten existing logs")
         # Create writer
         self.tb_writer = SummaryWriter(self.ckpt_path)
         # Add some textual notes
@@ -243,6 +243,16 @@ class DeepEnergyModel:
         self.log('loss_cdiv', cdiv_loss)
         self.log('energy_avg_real', real_out.mean())
         self.log('energy_avg_fake', fake_out.mean())
+        
+        # Log CNN beta and gamma (may be learnable)
+        try:
+            self.log('beta', self.cnn.beta)
+        except: 
+            _
+        try:
+            self.log('gamma', self.cnn.gamma)
+        except: 
+            _
 
         # Log layers weigth / bias norms
         for layer_id, layer in enumerate(self.cnn.cnn_layers):
