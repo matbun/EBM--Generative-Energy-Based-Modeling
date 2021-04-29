@@ -82,8 +82,8 @@ class CNNModel(nn.Module):
             nn.Linear(c_hid3, out_dim)
         )
         self.cnn_layers.apply(init_layers)
-        self.beta = nn.Parameter(torch.rand(1)) if beta is None else beta
-        self.gamma = nn.Parameter(torch.rand(1)) if gamma is None else gamma
+        self.beta = nn.Parameter(torch.rand(1)) if beta is None else torch.tensor(beta)
+        self.gamma = nn.Parameter(torch.rand(1)) if gamma is None else torch.tensor(gamma)
 
     def forward(self, x):
         x = self.cnn_layers(x).squeeze(dim=-1)

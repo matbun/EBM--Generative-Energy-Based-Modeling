@@ -60,7 +60,7 @@ class DeepEnergyModel:
     def __init__(self,
                  img_shape,
                  batch_size,
-                 alpha=1,
+                 alpha=0,
                  lr=1e-4,
                  weight_decay=1e-4,
                  mcmc_step_size=1e-5,
@@ -245,14 +245,8 @@ class DeepEnergyModel:
         self.log('energy_avg_fake', fake_out.mean())
         
         # Log CNN beta and gamma (may be learnable)
-        try:
-            self.log('beta', self.cnn.beta)
-        except: 
-            _
-        try:
-            self.log('gamma', self.cnn.gamma)
-        except: 
-            _
+        self.log('beta', self.cnn.beta.clone().detach().cpu())
+        self.log('gamma', self.cnn.gamma.clone().detach().cpu())
 
         # Log layers weigth / bias norms
         for layer_id, layer in enumerate(self.cnn.cnn_layers):
