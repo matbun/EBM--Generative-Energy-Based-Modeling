@@ -7,7 +7,7 @@ Trainer classes for different approaches in EBM training (MCMC sampling from mod
 - ...
 
 # models.py
-CNN model for 2D examples of shape: `(C x W X H) = (2 x 1 x 1)`.
+CNN model for 2D examples of shape: `(C x H X W) = (2 x 1 x 1)`.
 
 # utils.py
 - ToyDataset class
