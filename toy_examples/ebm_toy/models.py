@@ -15,11 +15,44 @@ def init_layers(m):
 class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
+    
+
+    
+#################################
+# ## TOY NETWORK FOR 2D DATA ## #
+#################################
+
+class ToyNet(nn.Module):
+    def __init__(self, dim=2, n_f=32, leak=0.05):
+        super().__init__()
+        self.cnn_layers = nn.Sequential(
+            nn.Conv2d(dim, n_f, 1, 1, 0),
+            nn.LeakyReLU(leak),
+            nn.Conv2d(n_f, n_f * 2, 1, 1, 0),
+            nn.LeakyReLU(leak),
+            nn.Conv2d(n_f * 2, n_f * 2, 1, 1, 0),
+            nn.LeakyReLU(leak),
+            nn.Conv2d(n_f * 2, n_f * 2, 1, 1, 0),
+            nn.LeakyReLU(leak),
+            nn.Conv2d(n_f * 2, 1, 1, 1, 0))
+         
+        #self.cnn_layers.apply(init_layers)
+        
+    def forward(self, x):
+        e = self.cnn_layers(x).squeeze()
+        #e_tilde = e + e**2/2
+        return e
+
+
+    
+#################################
+########## ## LeNet ## ##########
+#################################
 
 class LeNet(nn.Module):
     """ Adapted LeNet
     - Swish activ. func.
-    - padding=2 in first convo layer (instead of 0)
+    - padding=0 in first convo layer (instead of 0)
     """
     def __init__(self, out_dim=1, **kwargs):
         super().__init__()
@@ -43,6 +76,11 @@ class LeNet(nn.Module):
         #TO-DO: add beta...
         return x
     
+    
+#################################
+######## ## CNN custom ## #######
+#################################
+
 class CNNModel(nn.Module):
     """ Batchnorm makes the CDiv loss explode (in negative numbers)"""
     def __init__(self, hidden_features=32, out_dim=1, beta=0, gamma=0, **kwargs):
