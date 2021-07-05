@@ -26,27 +26,6 @@ from ebm.config import *
 from ebm.models import CNNModel
 
 
-def scheduler_stats(model, mcmc_steps_schedule, train_set_len, target_iters):
-    batches_per_epoch = int(train_set_len / model.batch_size)
-    print(f"batches_per_epoch: {batches_per_epoch}")
-    target_iterations = target_iters
-    epochs_2_target = int(np.ceil(target_iterations / batches_per_epoch))
-    print(f"epochs_2_target: <= {epochs_2_target}")
-    effective_tot_iters = epochs_2_target * batches_per_epoch
-    print(f"effective_tot_iters: {effective_tot_iters}")
-    area = 0
-    for i in range(len(mcmc_steps_schedule)):
-        if i == 0:
-            prev = 0
-        else:
-            prev = mcmc_steps_schedule[i-1][0]
-        area += (mcmc_steps_schedule[i][0] - prev) * mcmc_steps_schedule[i][1]
-    area += (effective_tot_iters - mcmc_steps_schedule[i][0]) * mcmc_steps_schedule[i][1]
-    avg_mcmc_steps_per_iter = area / effective_tot_iters
-    print(f"avg_mcmc_steps_per_iter: {avg_mcmc_steps_per_iter:.1f}")
-    return epochs_2_target
-
-
 class DeepEnergyModel:
     """
     model_name (str) - Any name to visually recognize the model, like the #run.
@@ -58,9 +37,8 @@ class DeepEnergyModel:
         add also the new logs, without removing the onld ones).
     """
     def __init__(self,
-                 img_shape,
-                 batch_size,
-                 alpha=0,
+                 img_shape=(1, 28, 28), 
+                 batch_size=64,
                  lr=1e-4,
                  weight_decay=1e-4,
                  mcmc_step_size=1e-5,
@@ -68,8 +46,10 @@ class DeepEnergyModel:
                  model_name="unnamed",
                  model_description="",
                  model_family="Langevin_vanilla",
+                 mcmc_init_type="gaussian",
                  device="cuda:1",
                  overwrite=False,
+                 start_epoch=0,
                  reload_model=False,
                  **CNN_args):
         super().__init__()
@@ -86,16 +66,15 @@ class DeepEnergyModel:
         self.lr = lr
         self.weight_decay = weight_decay
 
-        # Reg loss weigth
-        self.alpha = alpha
-
         # Dataset
         self.batch_size = batch_size
 
         # MCMC
         self.mcmc_step_size = mcmc_step_size
         self.mcmc_steps = mcmc_steps
-        self.sigma_sq_noise = 1
+        self.mcmc_persistent_data = (2 * torch.rand((10000,) + img_shape, device=self.device) - 1)
+        self.mcmc_init_type = mcmc_init_type
+
 
         # Logging
         # General purpose: add new element each iteration (batch)
@@ -116,23 +95,7 @@ class DeepEnergyModel:
         self.epoch_n = 0
         self.tot_batches = 0
         self.iter_n = 0
-        
-        # Convert mcmc_steps to string if it's a list of tuples (veriable mcmc steps)
-        if not isinstance(mcmc_steps, int):
-            # Write in the hparams dict a brief string.
-            conv_mcmc_steps = "schedule"
-        else:
-            conv_mcmc_steps = mcmc_steps
-        # Hyperparams dict
-        self.hparams_dict = {
-            'mcmc_step_size': self.mcmc_step_size,
-            'mcmc_steps': conv_mcmc_steps,
-            'lr': self.lr,
-            'weight_decay': self.weight_decay,
-            'batch_size': self.batch_size,
-            'optimizer': 'Adam',
-            'alpha': self.alpha
-        }
+        self.start_epoch = start_epoch
         
         # Setup flag: check the model has been properly set up before starting
         self.is_setup = False
@@ -141,6 +104,16 @@ class DeepEnergyModel:
         """Setup the optimizers, setup the Tensorboard SummaryWriter, process hyperparams dict."""
         # Optimizers
         self.configure_optimizers()
+        
+        # Hyperparams dict
+        self.hparams_dict = {
+            'mcmc_step_size': self.mcmc_step_size,
+            'mcmc_steps': self.mcmc_steps,
+            'lr': self.lr,
+            'weight_decay': self.weight_decay,
+            'batch_size': self.batch_size,
+            'optimizer': self.optimizer.__class__.__name__
+        }
         
         # Tensorboard logs
         hparams_str = "__".join(["=".join(
@@ -152,6 +125,7 @@ class DeepEnergyModel:
             path = os.path.join(self.ckpt_path, "model_state_dict.pt")
             self.cnn.load_state_dict(torch.load(path))
             print("Loaded pretrained existsing model")
+        
         ## Ovrewrite existsing model ##
         # Unautorized overwrite
         elif os.path.exists(self.ckpt_path) and not self.overwrite:
@@ -162,18 +136,13 @@ class DeepEnergyModel:
             # Remove existsing folder
             shutil.rmtree(self.ckpt_path)
             print("Overwriting existing logs")
+        
         # Create writer
         self.tb_writer = SummaryWriter(self.ckpt_path)
-        # Add some textual notes
-        # 1. Add docstring to interpret logs
+        # Add docstring to interpret logs
         self.tb_writer.add_text('logs_documentation', self.tb_logs_doc())
-        # 2. Add mcmc steps scheduler, if present
-        mcmc_steps_schedule = ""
-        if not isinstance(self.mcmc_steps, int):
-            mcmc_steps_schedule = "Schedule of MCMC steps:\n\n"
-            mcmc_steps_schedule += "-".join([f"{it}:{st}" for it,st in self.mcmc_steps])
         descr = "Model description:\n" + self.model_description + "\n\n\n"
-        self.tb_writer.add_text("model_description", descr + mcmc_steps_schedule, 100)
+        self.tb_writer.add_text("model_description", descr, 100)
         
         # Set is_setup flag to True
         self.is_setup = True
@@ -181,22 +150,15 @@ class DeepEnergyModel:
     def clear(self):
         # Tensorboard writer
         self.tb_writer.close()
-        
-        # TO-DO: remove cumbersome data structures
-        # ...
+
         
     def configure_optimizers(self):
-        # Energy models can have issues with momentum as the loss surfaces changes with its parameters.
-        # Hence, we set it to 0 by default.
         # Optimize only the layers that require grad
         self.optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.cnn.parameters()),
                                     lr=self.lr,
                                     weight_decay=self.weight_decay)
-        # scheduler = optim.lr_scheduler.StepLR(optimizer, 1, gamma=0.97) # Exponential decay over epochs
-        pass
 
     def prepare_data(self, train_set, test_set):
-        # Prepare data
         self.train_loader = data.DataLoader(train_set,
                                             batch_size=self.batch_size,
                                             shuffle=True,
@@ -208,69 +170,56 @@ class DeepEnergyModel:
                                            shuffle=False,
                                            drop_last=False,
                                            num_workers=2)
-        pass
 
     ######################################################
     ################ Training section ####################
     ######################################################
 
     def training_step(self, batch):
-
         # Train mode
         self.cnn.train()
 
-        # We add minimal noise to the original images to prevent the model from focusing on purely "clean" inputs
         real_imgs, _ = batch
         real_imgs = real_imgs.to(self.device)
-
-        #small_noise = torch.randn_like(real_imgs) * 0.005
-        #real_imgs.add_(small_noise).clamp_(min=-1.0, max=1.0)
-
+        
         # Obtain samples
         fake_imgs = self.generate_samples()
 
         # Predict energy score for all images
         inp_imgs = torch.cat([real_imgs, fake_imgs], dim=0)
         real_out, fake_out = self.cnn(inp_imgs).chunk(2, dim=0)
+        cdiv_loss = real_out.mean() - fake_out.mean() 
 
-        # Calculate losses
-        cdiv_loss = real_out.mean() - fake_out.mean()
-        if self.alpha > 0:
-            reg_loss = self.alpha * (real_out**2 + fake_out**2).mean()
-            loss = reg_loss + cdiv_loss
-        else:
-            reg_loss = torch.tensor(0)
-            loss = cdiv_loss
+        # Free memory
+        del real_imgs, fake_imgs, inp_imgs
 
         # Optimize
         self.optimizer.zero_grad()
-        loss.backward()
+        cdiv_loss.backward()
         self.optimizer.step()
 
         # Logging
-        self.log('loss', loss)
-        self.log('loss_reg', reg_loss)
         self.log('loss_cdiv', cdiv_loss)
         self.log('energy_avg_real', real_out.mean())
         self.log('energy_avg_fake', fake_out.mean())
         
-        # Log CNN beta and gamma (may be learnable)
-        self.log('beta', self.cnn.beta.clone().detach().cpu())
-        self.log('gamma', self.cnn.gamma.clone().detach().cpu())
-
         # Log layers weigth / bias norms
-        for layer_id, layer in enumerate(self.cnn.cnn_layers):
-            if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
-                self.log('layer%d_weight_norm' % layer_id,
+        mod = 1
+        for m in self.cnn.modules():
+            if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
+                if m.weight is not None:
+                    self.log(f"{m.__class__.__name__} #{str(mod)}: weight norm",
                          torch.norm(
-                             layer.weight).clone().detach().cpu().numpy(),
+                                     m.weight).clone().detach().cpu().numpy(),
                          printable=False)
-                self.log('layer%d_bias_norm' % layer_id,
-                         torch.norm(layer.bias).clone().detach().cpu().numpy(),
+                if m.bias is not None:
+                    self.log(f"{m.__class__.__name__} #{str(mod)}: bias norm",
+                         torch.norm(
+                                     m.bias).clone().detach().cpu().numpy(),
                          printable=False)
-
-        # Free memory
-        del real_imgs, fake_imgs, inp_imgs
+                    
+                mod +=1
+        
 
     def fit(self, n_epochs=None):
         
@@ -282,19 +231,22 @@ class DeepEnergyModel:
 
         # Epochs
         self.tot_batches = len(self.train_loader)
-        for self.epoch_n in range(n_epochs):
-            clear_output()
-            print("Epoch #" + str(self.epoch_n + 1))
-
+        self.tot_epochs = n_epochs - self.start_epoch
+        epochs_bar = tqdm(range(self.start_epoch, n_epochs), total=self.tot_epochs, leave=True)
+        epochs_bar.set_description("Epochs")
+        for self.epoch_n in epochs_bar:
             # Iterations
             self.log_active = True
-            for self.iter_n, batch in tqdm(enumerate(self.train_loader),
+            iters_bar = tqdm(enumerate(self.train_loader),
                                            total=self.tot_batches,
                                            position=0,
-                                           leave=True):
+                                           leave=False)
+            iters_bar.set_description("Batches (iterations)")
+            for self.iter_n, batch in iters_bar:
 
                 self.training_step(batch)
-
+                
+         
             ############## Tensorboard ###############
             # Evolution thoughout a mcmc simulation
             self.tb_mcmc_simulation()
@@ -306,12 +258,9 @@ class DeepEnergyModel:
             self.tb_writer.flush()
 
             ############# Other logs ################
-            # Plot evolution of gradients and parameters norms
-            #self.plot_epoch_evolution()
-
             # Print logged measures
-            self.flush_logs()
-            
+            #self.flush_logs()
+                        
             # Save model state dict (params)
             self.save_model()
 
@@ -342,23 +291,28 @@ class DeepEnergyModel:
         """
         batch_size = self.batch_size if batch_size is None else batch_size
         mcmc_steps = self.mcmc_steps if mcmc_steps is None else mcmc_steps
-        if not isinstance(mcmc_steps, int):
-            # mcmc steps not fixed, but using a scheduler of the form
-            # [(up_to_iter_i, mcmc_steps), (up_to_iter_j, mcmc_steps), ...]
-            global_iter = self.epoch_n * self.tot_batches + self.iter_n
-            curr_steps = None
-            for max_iter,steps in mcmc_steps:
-                if max_iter > global_iter:
-                    break
-            mcmc_steps = steps
         
         is_training = self.cnn.training
         self.cnn.eval()
-
-        # Init images with RND normal noise: x_i ~ N(0,1)
-        x = torch.randn((batch_size, ) + self.img_shape, device=self.device)
+        
+        # Initial batch of noise / images: starting point of mcmc chain
+        def sample_s_t_0():
+            if self.mcmc_init_type == 'persistent' and not evaluation:
+                rand_inds = torch.randperm(self.mcmc_persistent_data.shape[0])[0:batch_size]
+                return self.mcmc_persistent_data[rand_inds], rand_inds
+            elif self.mcmc_init_type == 'data' and not evaluation:
+                raise RuntimeError("EBM train: Not implmented error")
+                #return torch.Tensor(self.train_set.sample_toy_data(batch_size)), None
+            elif self.mcmc_init_type == 'uniform' or evaluation:
+                return  (2 * torch.rand((batch_size,) + self.img_shape, device=self.device) - 1) , None
+            elif self.mcmc_init_type == 'gaussian' and not evaluation:
+                return torch.randn((batch_size,) + self.img_shape, device=self.device) , None
+            else:
+                raise RuntimeError('Invalid method for "init_type" (use "persistent", "data", "uniform", or "gaussian")')
+        
+        x, rand_inds = sample_s_t_0()
+        x = torch.autograd.Variable(x.clone(), requires_grad=True).to(self.device)
         original_x = x.clone().detach()
-        x.requires_grad = True
         
         noise_scale = np.sqrt(self.mcmc_step_size * 2)
         
@@ -385,25 +339,19 @@ class DeepEnergyModel:
             if self.iter_n < time_window:
                 #Used to compute prev_distances items
                 old_x = x.clone().detach()
-            
-            # x.data.clamp_(min=-1.0, max=1.0)
 
             # Re-init noise tensor
             noise.normal_(mean=0.0, std=noise_scale)
             out = self.cnn(x)
             grad = autograd.grad(out.sum(), x, only_inputs=True)[0]
             # grad is in "device" by default
+            
+            # Avoid NaN gradients
+#             if torch.any(torch.isnan(grad)):
+#                 self.tb_writer.flush()
+#                 raise RuntimeError("Langevin grad has some NaN values!")
 
-            ##### Normalize gradient with Frobenius norm (~smaller tha the unit sphere)######
-            #n_pixels = img_shape[0] * img_shape[1]
-            #k = torch.tensor(torch.sqrt(n_pixels) / torch.norm(grad, dim=[2, 3]).mean())
-            # grad.data.multiply_(k)
-
-            # Avoid clamping
-            # grad.data.clamp_(-0.03, 0.03) 
-
-            dynamics = self.mcmc_step_size * grad + noise
-            x = x - dynamics
+            x = x - self.mcmc_step_size * grad + noise
 
             # Save stats            
             grad_norms = append_norm(grad, grad_norms)
@@ -459,14 +407,6 @@ class DeepEnergyModel:
 
         return x.detach()
     
-    def normalize_batch(self, batch):
-        """normalizes a images batch of size BxCxWxH in [-1,1], as MNIST images"""
-        img_area = self.img_shape[1] * self.img_shape[2]
-        batch -= batch.view(-1,img_area).min(axis=1)[0].view(-1,1,1,1)
-        batch /= batch.view(-1,img_area).max(axis=1)[0].view(-1,1,1,1)
-        # From [0,1] to [-1,1]
-        batch = batch * 2 - 1 
-        return batch
     ######################################################
     #################### Utilities #######################
     ######################################################
@@ -512,90 +452,7 @@ class DeepEnergyModel:
         self.tb_writer.add_image(img_name, grid_img, g_step)
         return grid_img
 
-    def downsample(self, l, downsampling_perc_=0.05):
-        """Downsample a list of measurements"""
-        l = np.array(l)
-        step_ = int(np.ceil(l.shape[0] * downsampling_perc_))
-        l = l[::step_]
-        x = step_ * np.array(range(l.shape[0]))
-        return x, l
-
-    def plot_epoch_evolution(self):
-        """
-        Plots the charts of MCMC gradient and images norm, model parameters norms and losses
-        """
-        FIGSIZE = (14, 20)
-        fig, ax = plt.subplots(figsize=FIGSIZE,
-                               nrows=3,
-                               ncols=1,
-                               gridspec_kw={'hspace': 0.3})
-
-        # MCMC stats
-        grad_norms, _ = self.log_dict.get('langevin_avg_grad_norm', (None, None))
-        data_norms, _ = self.log_dict.get('langevin_avg_img_norm', (None, None))
-        if grad_norms is not None and data_norms is not None:
-            x_g, grad_norms = self.downsample(grad_norms)
-            x_d, data_norms = self.downsample(data_norms)
-
-            color = 'tab:red'
-            ax[0].set_xlabel('Iterations (batches)', fontsize=14)
-            ax[0].set_ylabel('grad norm', color=color, fontsize=14)
-            ax[0].plot(x_g, grad_norms, color=color)
-            ax[0].tick_params(axis='y', labelcolor=color)
-
-            ax2 = ax[0].twinx()
-
-            color = 'tab:blue'
-            ax2.set_ylabel('img norm', color=color, fontsize=14)
-            ax2.plot(x_d, data_norms, color=color)
-            ax2.tick_params(axis='y', labelcolor=color)
-            ax2.set_title("Langevin dynamics", fontsize=16)
-
-        # Weigths / biases stats
-        for layer_id, layer in enumerate(self.cnn.cnn_layers):
-            if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
-                # Weights
-                layer_name = 'layer%d_weight_norm' % layer_id
-                layer_weights, _ = self.log_dict.get(layer_name, (None, None))
-                if layer_weights is not None:
-                    x_w, layer_weights = self.downsample(layer_weights)
-                    ax[1].plot(x_w, layer_weights, label=layer_name)
-
-                # Biases
-                layer_name = 'layer%d_bias_norm' % layer_id
-                layer_biases, _ = self.log_dict.get(layer_name, (None, None))
-                if layer_weights is not None:
-                    x_b, layer_biases = self.downsample(layer_biases)
-                    ax[1].plot(x_b, layer_biases, label=layer_name)
-
-        ax[1].set_title("Model parameters", fontsize=16)
-        ax[1].set_xlabel('Iterations (batches)', fontsize=14)
-        ax[1].set_ylabel('Norm', fontsize=14)
-        ax[1].legend()
-
-        # Losses
-        losses_to_plot = [
-            'loss', 'loss_cdiv', 'loss_reg', 'energy_avg_real',
-            'energy_avg_fake'
-        ]
-        loss_markers = ['x', '-', '-', '-', '-']
-        if self.alpha == 0:
-            reg_id = losses_to_plot.index('loss_reg')
-            del losses_to_plot[reg_id]
-            del loss_markers[reg_id]
-
-        for loss_name, marker in zip(losses_to_plot, loss_markers):
-            l, _ = self.log_dict.get(loss_name, (None, None))
-            if l is not None:
-                x_l, l = self.downsample(l)
-                ax[2].plot(x_l, l, marker, label=loss_name)
-        ax[2].set_title("Losses & energies", fontsize=16)
-        ax[2].set_xlabel('Iterations (batches)', fontsize=14)
-        ax[2].legend()
-
-        fig.tight_layout
-        plt.show()
-
+   
     def log(self, name, val, printable=True):
         """
         name: string name of the property to log
@@ -665,46 +522,6 @@ class DeepEnergyModel:
         'layer_': norm of weights/biases of a given layer
         """
 
-    ######################################################
-    ################# Validation step ####################
-    ######################################################
-
-    def validation_step(self, batch, batch_idx):
-        # For validating, we calculate the contrastive divergence between purely random images and unseen examples
-        # Note that the validation/test step of energy-based models depends on what we are interested in the model
-        self.cnn.eval()
-
-        real_imgs, _ = batch
-        real_imgs = real_imgs.to(self.device)
-
-        #fake_imgs = torch.randn_like(real_imgs)
-        fake_imgs = self.generate_samples()
-
-        inp_imgs = torch.cat([real_imgs, fake_imgs], dim=0)
-        real_out, fake_out = self.cnn(inp_imgs).chunk(2, dim=0)
-
-        cdiv = real_out.mean() - fake_out.mean()
-        self.log('val_loss', cdiv)
-        self.log('val_fake_out', fake_out.mean())
-        self.log('val_real_out', real_out.mean())
-
-    def validate(self, n_epochs=None):
-        """To-Do: finish implementation of this"""
-        if self.test_loader is None:
-            print("Test data not loaded")
-            return
-
-        # Iterations
-        self.log_active = True
-        for batch in tqdm(self.test_loader,
-                          total=len(self.test_loader),
-                          position=0,
-                          leave=True):
-            self.training_step(batch)
-            
-            
-            
-
             
             
             
@@ -716,7 +533,7 @@ class EBMLangVanilla(DeepEnergyModel):
 
 
 class EBMLang2Ord(DeepEnergyModel):
-    """Second order Langevin Dynamics, with leapfrog"""
+    """SGHMC: Second order Langevin Dynamics, with leapfrog"""
     def __init__(self, C=2, mass=1, **kwargs):
         super().__init__(**kwargs)
         self.C = C
@@ -736,15 +553,6 @@ class EBMLang2Ord(DeepEnergyModel):
         """
         batch_size = self.batch_size if batch_size is None else batch_size
         mcmc_steps = self.mcmc_steps if mcmc_steps is None else mcmc_steps
-        if not isinstance(mcmc_steps, int):
-            # mcmc steps not fixed, but using a scheduler of the form
-            # [(up_to_iter_i, mcmc_steps), (up_to_iter_j, mcmc_steps), ...]
-            global_iter = self.epoch_n * self.tot_batches + self.iter_n
-            curr_steps = None
-            for max_iter,steps in mcmc_steps:
-                if max_iter > global_iter:
-                    break
-            mcmc_steps = steps
         
         is_training = self.cnn.training
         self.cnn.eval()
@@ -788,8 +596,10 @@ class EBMLang2Ord(DeepEnergyModel):
             noise.normal_(mean=0.0, std=noise_scale)
             out = self.cnn(x)
             grad = autograd.grad(out.sum(), x, only_inputs=True)[0]
+            
+            x = x + self.mcmc_step_size * self.mass * momentum
             momentum = momentum - self.mass * momentum * self.mcmc_step_size * self.C - self.mcmc_step_size * grad + noise
-            x = x + self.mcmc_step_size * self.mass * momentum 
+           
 
             # Save stats            
             grad_norms = append_norm(grad, grad_norms)
@@ -849,7 +659,3 @@ class EBMLang2Ord(DeepEnergyModel):
             self.log('langevin_avg_distance_start2end', e2e_distances)
 
         return x.detach()
-    
-    
-    
-        

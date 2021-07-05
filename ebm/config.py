@@ -26,10 +26,12 @@ DATASET_PATH = PROJECT_ROOT + "/data"
 # Path to the folder where the pretrained models are saved
 CHECKPOINT_PATH = PROJECT_ROOT + "/saved_models/MNIST/"
 
-# Ensure that all operations are deterministic on GPU (if used) for reproducibility
-torch.backends.cudnn.determinstic = True
-torch.backends.cudnn.benchmark = False
 
 # Set rdn seed
-torch.manual_seed(0)
-np.random.seed(0)
+def set_seed(seed: int=0, deterministic: bool=True, benchmark: bool=False):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    # Ensure that all operations are deterministic on GPU (if used) for reproducibility
+    torch.backends.cudnn.determinstic = deterministic
+    torch.backends.cudnn.benchmark = benchmark

@@ -9,6 +9,9 @@ import torchvision as tv
 from torch.utils.data import Dataset
 import matplotlib
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib import cm
+from matplotlib.ticker import LinearLocator, FormatStrFormatter
 
 
 
@@ -149,6 +152,13 @@ class ToyDataset(Dataset):
             for y_ind in range(len(self.xy_plot)):
                 self.z_true_density[x_ind, y_ind] = self.true_density([self.xy_plot[x_ind], self.xy_plot[y_ind]])
     
+    @property
+    def tile_side(self):
+        return self.xy_plot[1] - self.xy_plot[0]
+    @property
+    def plot_side(self):
+        return np.abs(2*self.plot_val_max)
+    
     def __len__(self):
         return self.dataset_len
     
@@ -175,7 +185,7 @@ class ToyDataset(Dataset):
 
         return toy_sample
     
-    def ebm_learned_density(self, f, epsilon=0.0):
+    def ebm_learned_energy(self, f):
         xy_plot_torch = t.Tensor(self.xy_plot).view(-1, 1, 1, 1).to(next(f.parameters()).device)
         # y values for learned energy landscape of descriptor network
         z_learned_energy = np.zeros([self.viz_res, self.viz_res])
@@ -183,16 +193,57 @@ class ToyDataset(Dataset):
             y_vals = float(self.xy_plot[i]) * t.ones_like(xy_plot_torch)
             vals = t.cat((xy_plot_torch, y_vals), 1)
             z_learned_energy[i] = f(vals).data.cpu().numpy()
-        # rescale y values to correspond to the groundtruth temperature
-        if epsilon > 0:
-            z_learned_energy *= 2 / (epsilon ** 2)
+        
+        return z_learned_energy
+    
+    def plot_learned_energy_surf(self, f, mcmc_lr):
+        # Learned energy
+        z_learned_energy = self.ebm_learned_energy(f)
+        
+        fig = plt.figure(figsize=(10,10))
+        ax = fig.gca(projection='3d')
 
+        # Make data.
+        X = self.xy_plot
+        Y = self.xy_plot
+        X, Y = np.meshgrid(X, Y)
+        Z = z_learned_energy
+
+        # Plot the surface.
+        surf = ax.plot_surface(X, Y, Z, cmap=cm.coolwarm,
+                               linewidth=0, antialiased=False, alpha=0.7)
+
+        # Customize the z axis.
+        ax.zaxis.set_major_locator(LinearLocator(10))
+        ax.zaxis.set_major_formatter(FormatStrFormatter('%.02f'))
+
+        # Rotate plot
+        ax.view_init(30, 30) # Rotation of the 3d plot
+        ax.set_title(f"Energy landscape. $\eta={mcmc_lr:.0e}$")
+
+
+        # Add a color bar which maps values to colors.
+        fig.colorbar(surf, shrink=0.5, aspect=5)
+
+        plt.show()
+        
+    
+    def ebm_learned_density(self, f, epsilon=0.0):
+        z_learned_energy = self.ebm_learned_energy(f)
+        
         # transform learned energy into learned density
         z_learned_density_unnormalized = np.exp(- (z_learned_energy - np.min(z_learned_energy)))
         bin_area = (self.xy_plot[1] - self.xy_plot[0]) ** 2
         z_learned_density = z_learned_density_unnormalized / (bin_area * np.sum(z_learned_density_unnormalized))
         
         return z_learned_density
+    
+    def ebm_kl_divergence(self, f):
+        """Compute KL[p || q]"""
+        p = self.z_true_density
+        q = self.ebm_learned_density(f)
+        bin_area = (self.xy_plot[1] - self.xy_plot[0]) ** 2
+        return bin_area * np.sum(np.where(p != 0, p * np.log(p / q), 0))
         
 
     def plot_toy_density(self, plot_truth=False, f=None, epsilon=0.0, x_s_t=None, save_path='toy.pdf'):
@@ -210,15 +261,12 @@ class ToyDataset(Dataset):
                 y_vals = float(self.xy_plot[i]) * t.ones_like(xy_plot_torch)
                 vals = t.cat((xy_plot_torch, y_vals), 1)
                 z_learned_energy[i] = f(vals).data.cpu().numpy()
-            # rescale y values to correspond to the groundtruth temperature
-            if epsilon > 0:
-                z_learned_energy *= 2 / (epsilon ** 2)
 
             # transform learned energy into learned density
             z_learned_density_unnormalized = np.exp(- (z_learned_energy - np.min(z_learned_energy)))
             bin_area = (self.xy_plot[1] - self.xy_plot[0]) ** 2
             z_learned_density = z_learned_density_unnormalized / (bin_area * np.sum(z_learned_density_unnormalized))
-
+            
         # kernel density estimate of shortrun samples
         if x_s_t is not None:
             num_plots += 1
