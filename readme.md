@@ -8,5 +8,5 @@ These packages offer key utilities to train an Energy Based Model with ML estima
 
 Two python packages:
 - `ebm`: train on MNIST dataset
-- `ebm_toy`: train on **gmm** (gaussian mixture model) or **circles** 2D datasets, where the ground truth distribution is known and supervised metrics (e.g. Kolmogorov-Smirnov distance) can be computed.
+- `ebm_toy` in `toy_examples` folder: train on **gmm** (gaussian mixture model) or **circles** 2D datasets, where the ground truth distribution is known and supervised metrics (e.g. Kolmogorov-Smirnov distance) can be computed.
 
